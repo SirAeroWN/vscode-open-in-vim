@@ -3,8 +3,7 @@ import * as fs from 'fs';
 import * as tmp from 'tmp';
 import * as os from 'os';
 import * as opn from 'opn';
-import { execSync, spawnSync } from 'child_process';
-import { WorkspaceFolder } from 'vscode';
+import { execSync } from 'child_process';
 
 /*
  * Called when extension is activated. This happens the very first time the
@@ -34,24 +33,12 @@ export function deactivate() {
 type Config = {
     openMethod: OpenMethodKey;
     useNeovim: boolean;
-    restoreCursorAfterVim: boolean;
+    gvimPath: string;
     'integrated-terminal': {
         pathToShell: string;
     },
-    linux?: {
-        'gnome-terminal'?: {
-            args: string
-        };
-        tilix?: {
-            args: string
-        };
-    },
-    macos?: {
-        iterm: {
-            profile: string;
-        }
-    }
 };
+
 const PATH_TO_WINDOWS_GIT_SHELL = 'C:\\Program Files\\Git\\bin\\bash.exe';
 function getConfiguration(): Config {
     let configuration = { ...vscode.workspace.getConfiguration()["open-in-vim"] };
@@ -65,21 +52,11 @@ function getConfiguration(): Config {
         };
     }
 
-    let openMethodLegacyAliases = [
-        ["osx.iterm",  "macos.iterm"],
-        ["osx.macvim", "macos.macvim"]
-    ];
-    for (let [legacyValue, newValue] of openMethodLegacyAliases) {
-        if (configuration.openMethod === legacyValue) {
-            configuration.openMethod = newValue;
-        }
-    }
-
     return configuration;
 }
 
 function openInVim() {
-    const { openMethod, useNeovim, restoreCursorAfterVim } = getConfiguration();
+    const { openMethod, useNeovim, gvimPath } = getConfiguration();
 
     let activeTextEditor = vscode.window.activeTextEditor;
     if (!activeTextEditor) {
@@ -119,19 +96,17 @@ function openInVim() {
     let position = activeTextEditor.selection.active;
     let fileName = activeTextEditor.document.fileName;
     let line = position.line+1;
-    let column = position.character+1;
-    let autocmdArgToSyncCursor = `'+autocmd VimLeavePre * execute \"!code --goto \" . expand(\"%\") . \":\" . line(\".\") . \":\" . col(\".\")'`;
 
     actualOpenMethod({
-        vim: useNeovim ? 'nvim' : 'vim',
+        vim: openMethod == 'path' ? gvimPath : useNeovim ? 'nvim' : 'vim',
         fileName: fileName,
         // cannot contain double quotes
-        args: `'+call cursor(${line}, ${column})' ${restoreCursorAfterVim ? autocmdArgToSyncCursor : ''}; exit`,
+        args: `+${line}`,
         workspacePath,
     });
 }
 
-type OpenMethodKey = 'gvim' | 'integrated-terminal' | 'linux.gnome-terminal' | 'linux.tilix' | 'macos.iterm' | 'macos.macvim';
+type OpenMethodKey = 'path' | 'integrated-terminal';
 
 interface OpenMethodsArgument {
     vim: string;
@@ -144,15 +119,11 @@ type OpenMethods = {
     [key in OpenMethodKey]: (a: OpenMethodsArgument) => void;
 };
 
-function openArgsToCommand(openArgs: OpenMethodsArgument) {
-    return `${openArgs.vim} '${openArgs.fileName}' ${openArgs.args}`;
-}
-
 function openArgsToScriptFile(openArgs: OpenMethodsArgument) {
     let tmpFile = tmp.fileSync();
     fs.writeFileSync(tmpFile.name, `
         cd '${openArgs.workspacePath}'
-        ${openArgsToCommand(openArgs)}
+        ${openArgs.vim} '${openArgs.fileName}' ${openArgs.args}; exit
     `);
     return tmpFile.name;
 }
@@ -172,18 +143,8 @@ function ensureUnixPathFormat(path: string, isWslStyle: boolean): string {
 }
 
 const openMethods: OpenMethods = {
-    "gvim": function(openArgs: OpenMethodsArgument) {
-        if (os.type().startsWith('Windows')) {
-            const viewAlternatePlugin = 'View alternative plugin';
-            vscode.window.showErrorMessage('Gvim is not supported on Windows. ლ(ಠ_ಠლ)', viewAlternatePlugin).then(choice => {
-                if (choice === viewAlternatePlugin) {
-                    opn('https://marketplace.visualstudio.com/items?itemName=mattn.OpenVim');
-                }
-            });
-            return;
-        }
-        openArgs.vim = 'gvim';
-        execSync(openArgsToCommand(openArgs), {
+    "path": function(openArgs: OpenMethodsArgument) {
+        execSync(`${openArgs.vim} ${openArgs.args} -- ${openArgs.fileName}`, {
             cwd: openArgs.workspacePath,
             encoding: "utf8"
         });
@@ -223,40 +184,5 @@ const openMethods: OpenMethods = {
         });
         terminal.show(true);
         vscode.commands.executeCommand("workbench.action.terminal.focus");
-    },
-    "linux.gnome-terminal": function(openArgs: OpenMethodsArgument) {
-        let args = getConfiguration().linux!['gnome-terminal']!.args;
-        let gnomeTerminalCommand = `gnome-terminal ${args} --command='bash ${openArgsToScriptFile(openArgs)}'`;
-        execSync(gnomeTerminalCommand);
-    },
-    "linux.tilix": function(openArgs: OpenMethodsArgument) {
-        let args = getConfiguration().linux!.tilix!.args;
-        let tilixCommand = `tilix ${args} --command='bash ${openArgsToScriptFile(openArgs)}'`;
-        execSync(tilixCommand);
-    },
-    "macos.iterm": function (openArgs: OpenMethodsArgument) {
-        let profile = getConfiguration().macos!.iterm!.profile;
-        if (profile !== "default profile") {
-            profile = `profile "${profile}"`;
-        }
-        let osascriptcode = `
-            tell application "iTerm"
-              set myNewWin to create window with ${profile} command "bash ${openArgsToScriptFile(openArgs)}"
-            end tell
-        `;
-        let result = spawnSync("/usr/bin/osascript", {encoding: "utf8", input: osascriptcode});
-        if (result.error) {
-            throw result.error;
-        }
-        if (result.stderr) {
-            throw result.stderr;
-        }
-    },
-    "macos.macvim": function(openArgs: OpenMethodsArgument) {
-        openArgs.vim = 'mvim';
-        execSync(openArgsToCommand(openArgs), {
-            cwd: openArgs.workspacePath,
-            encoding: "utf8"
-        });
     },
 };
