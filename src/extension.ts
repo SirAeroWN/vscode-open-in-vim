@@ -145,7 +145,7 @@ function ensureUnixPathFormat(path: string, isWslStyle: boolean): string {
 const openMethods: OpenMethods = {
     "path": function(openArgs: OpenMethodsArgument) {
         execSync(`${openArgs.vim} ${openArgs.args} -- ${openArgs.fileName}`, {
-            cwd: openArgs.workspacePath,
+            cwd: openArgs.workspacePath.slice(1),
             encoding: "utf8"
         });
     },
